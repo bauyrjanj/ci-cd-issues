@@ -1,0 +1,236 @@
+#
+# A pipeline is composed of independent jobs that run scripts, grouped into stages.
+# Stages run in sequential order, but jobs within stages run in parallel.
+# For more information, see: https://docs.gitlab.com/ee/ci/yaml/README.html#stages
+#
+default:
+    image:
+        name: rasa/rasa
+        entrypoint: [""]
+    image: 
+        name: python:latest
+
+variables:
+  # preferred storage driver 
+  DOCKER_DRIVER: overlay2
+  # Create the certificates inside this directory for both the server
+  # and client. The certificates used by the client will be created in
+  # /certs/client so we only need to share this directory with the
+  # volume mount in `config.toml`
+  DOCKER_TLS_CERTDIR: ""
+  # the docker daemon, dockerd, listens for Docker API requests and manages Docker objects such as images,
+  # containers, networks and volumes.
+  DOCKER_HOST: tcp://docker:2375
+  MOUNT_POINT: /builds/$CI_PROJECT_PATH/mnt
+  #CONTAINER_IMAGE_FE: $CI_REGISTRY_IMAGE/$CI_COMMIT_REF_SLUG/fe:$CI_COMMIT_SHA
+  CONTAINER_IMAGE_BOT: $CI_REGISTRY_IMAGE/$CI_COMMIT_REF_SLUG/bot:$CI_COMMIT_SHA
+
+services:
+  - docker:dind
+
+stages:
+    - build 
+    - test
+    - train
+    - test-model
+#    - notify
+#    - review
+#    - deploy
+
+#build-client-image:
+#    stage: build
+#    image: docker:19.03.1
+#    script:
+#        - sleep 5
+#        - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY # where to get these credentials?
+#        - docker build -t $CONTAINER_IMAGE_FE -f Dockerfile.fe .
+#        - docker push $CONTAINER_IMAGE_FE
+#    tags:
+#        - docker
+#        - gce
+    
+build-bot-image:
+    stage: build
+    image: docker:19.03.1
+    script:
+        - sleep 5
+        - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+        - docker build -t $CONTAINER_IMAGE_BOT -f Dockerfile . # create a Docker image from the Dockerfile 
+        - docker push $CONTAINER_IMAGE_BOT
+    tags:
+        - docker
+#        - gce # what is gce equivalent in our environment?
+ 
+test-bot-data-integrity:
+    stage: test
+    image: $CONTAINER_IMAGE_BOT
+    script:
+        - rasa data validate --verbose --debug --max-history 5
+    artifacts:
+        paths:
+            - ./data
+
+train-model:
+    stage: train
+    image: $CONTAINER_IMAGE_BOT
+    script:
+        - rasa train -c config.yml -d domain.yml 
+    artifacts:
+        paths:
+            - ./models
+
+    tags:
+        - gpu
+        
+test-model:
+    stage: test-model
+    image: $CONTAINER_IMAGE_BOT
+    script:
+        - rasa test nlu -u data/nlu.yml --config config.yml --cross-validation
+    artifacts:
+        paths:
+            - ./results
+
+#cml:
+#    stage: notify
+#    image: dvcorg/cml-py3:latest
+#    script:
+#        - pip install pytablewriter
+#        - cd results
+#        - python report_results.py 
+#        - cat intent_report.md
+#        - echo > plots.md
+#        - cml-publish intent_histogram.png --md --title 'Intent Histogram' >> plots.md
+#        - cml-publish intent_confusion_matrix.png --md --title 'Confusion-matrix' >> plots.md
+#        - cml-send-comment intent_report.md
+#        - cml-send-comment plots.md
+        
+
+#wiki-write-reports:
+#    stage: notify
+#    image: python
+#    script:
+#    - pip install pytablewriter
+#    - echo "table writer installed"
+#    - cd results && python report_results.py
+#    - results=$(cat intent_report.md)
+#    - curl --request POST --header "PRIVATE-TOKEN:$WIKI_API_KEY" --form "file=@intent_histogram.png" "https://gitlab.com/api/v4/projects/$CI_PROJECT_ID/wikis/attachments"
+#    - curl --data "format=markdown&title=$CI_JOB_ID&content=$results" --header "PRIVATE-TOKEN:$WIKI_API_KEY" "https://gitlab.com/api/v4/projects/$CI_PROJECT_ID/wikis"
+#    - mv ./intent_report.md ${CI_PROJECT_DIR}
+#    artifacts:
+#        paths:
+#            - ./intent_report.md
+    
+
+#review-bot:
+#    stage: review
+#    image: lachlanevenson/k8s-kubectl:latest
+#    environment:
+#        name: review/$CI_COMMIT_REF_NAME
+#        url: https://$CI_ENVIRONMENT_SLUG.35.204.237.217.nip.io 
+#
+#    script:
+#      - cd k8s/
+#      - sed -i  "s|{CONTAINER_IMAGE_FE}|$CONTAINER_IMAGE_FE|" k8s-fe-server-deploy.yaml
+#      - sed -i "s|{CI_ENVIRONMENT_SLUG}|$CI_ENVIRONMENT_SLUG|" k8s-fe-server-deploy.yaml
+#      - sed -i "s|{CI_PROJECT_PATH_SLUG}|$CI_PROJECT_PATH_SLUG|" k8s-fe-server-deploy.yaml
+#      - sed -i "s|{CI_ENVIRONMENT_SLUG}|$CI_ENVIRONMENT_SLUG|" k8s-ext-service.yaml
+#      - kubectl apply -f k8s-fe-server-deploy.yaml && kubectl apply -f k8s-ext-service.yaml
+#      - sed -i "s|{CI_ENVIRONMENT_SLUG}|$CI_ENVIRONMENT_SLUG|" k8s-ingress.yaml
+#      - cat k8s-ingress.yaml
+#      - kubectl apply -f k8s-ingress.yaml
+#      - kubectl get deployments,services
+#    only:
+#     - branches
+#    except:
+#     - master 
+#    tags:
+#     - bot-agent
+
+#deploy-prod-bot-client:
+#   stage: deploy
+#   image: lachlanevenson/k8s-kubectl:latest
+#   environment:
+#     name: production
+#     url: https://$CI_ENVIRONMENT_SLUG.35.204.237.217.nip.io
+#   script:
+#      - cd k8s/
+#      - sed -i  "s|{CONTAINER_IMAGE_FE}|$CONTAINER_IMAGE_FE|" k8s-fe-server-deploy.yaml
+#      - sed -i "s|{CI_ENVIRONMENT_SLUG}|$CI_ENVIRONMENT_SLUG|" k8s-fe-server-deploy.yaml
+#      - sed -i "s|{CI_PROJECT_PATH_SLUG}|$CI_PROJECT_PATH_SLUG|" k8s-fe-server-deploy.yaml
+#      - sed -i "s|{CI_ENVIRONMENT_SLUG}|$CI_ENVIRONMENT_SLUG|" k8s-ext-service.yaml
+#      - kubectl apply -f k8s-fe-server-deploy.yaml && kubectl apply -f k8s-ext-service.yaml
+#      - sed -i "s|{CI_ENVIRONMENT_SLUG}|$CI_ENVIRONMENT_SLUG|" k8s-ingress.yaml
+#      - cat k8s-ingress.yaml
+#      - kubectl apply -f k8s-ingress.yaml
+#      - kubectl get deployments,services
+#   only:
+#     - master
+#   tags:
+#     - myrunner
+
+#rollout-10:
+#    stage: deploy
+#    image: python
+#    script:
+#        - echo "test"
+#    when: manual 
+#    only:
+#        - master
+
+#rollout-20:
+#    stage: deploy
+#    image: python
+#    script:
+#        - echo "test"
+#    when: manual 
+#    only:
+#        - master
+
+#rollout-30:
+#    stage: deploy
+#    image: python
+#    script:
+#        - echo "test"
+#    when: manual 
+#    only:
+#        - master
+
+#rollout-50:
+#    stage: deploy
+#    image: python
+#    script:
+#        - echo "test"
+#    when: manual 
+#    only:
+#        - master
+
+#rollout-80:
+#    stage: deploy
+#    image: python
+#    script:
+#        - echo "test"
+#    when: manual 
+#    only:
+#        - master
+
+#deploy-to-model-server-100:
+#    stage: deploy
+#    image: python
+#    before_script:
+#        - pip install requests
+#    script:
+#        - outputModel=$(find models/ -name '*.tar.gz')
+#        - echo $outputModel
+#        - basename "$outputModel"
+#        - file="$(basename -- $outputModel)"
+#        - cd models
+#        - curl -k -F "model=@$file" "$MODEL_SERVER_IP/api/projects/default/models?api_token=$MODEL_SERVER_API_TOKEN"
+#        - ls && cd ..
+#        - cd cli/
+#        - model=$(echo "$file" | cut -f 1 -d '.')
+#        - python activate_model.py $model
+#        - echo "All Steps Executed"
+#    when: manual
+#    only:
+#        - master
